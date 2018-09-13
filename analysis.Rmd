@@ -4,18 +4,19 @@ author: "Harish Sukhwani (h (dot) sukhwani AT gmail (dot) com)"
 date: "`r format(Sys.Date())`"
 license: "Apache License 2.0"
 bibliography: references.bib
-#output: rmarkdown::github_document
-output:
-  html_document:
-    keep_md: true
+output: rmarkdown::github_document
+# output:
+#   html_document:
+#     keep_md: true
 ---
-
-In this document, I share examples of doing software aging analysis. The analysis and plots shared in this document also appeared in our published paper [@WOSAR17]. Our analysis covers the following concepts of software aging analysis:  
+In this document, I share examples of doing software aging analysis using R. Our analysis covers the following concepts of software aging analysis:  
 
 1. Trend Detection - Determine if there is an increasing trend over time  
 2. Trend Estimation - Model the growth trend using statistical modeling techniques  
 3. Trend Prediction - Use the best-fit model to predict the future values  
-  
+
+The concepts demonstrated here are mature in the software aging community (see [@Grottke-08], [@Cotroneo-14]). While doing my research in 2016-2017, surprisingly, I could not find relevant sample code or examples for reference. I thought of sharing the code and analysis of representative examples from our published paper [@WOSAR17].
+
 ```{r echo=FALSE}
 set.seed(47)
 ```
@@ -28,6 +29,7 @@ knitr::opts_chunk$set(
 
 We include the following R libraries for our analysis. You can install the missing packages using command `install.packages('package_name')`.
 ```{r message=FALSE}
+library(fpp)
 library(Kendall)
 library(boot)
 library('xts')
@@ -66,7 +68,7 @@ training_Set_size <- 0.67
 
 ```
 
-## Dataset without Seasonality
+# Dataset without Seasonality
 As an example, we analyze the Resident Set Size (RSS) usage of PSM 'Appln2' process [@WOSAR17]. We perform trend detection using Mann-Kendall test [@Kendall-70]. Since this dataset shows a growth trend, we fit the dataset using the following modeling techiques  
 
 1. Theil-Sen's slope [@Sen-68]
@@ -175,11 +177,306 @@ kable(gof_df)
 
 Thus Piecewise linear is the best-fit model. 
 
-## Dataset with Seasonality
+Comments about goodness-of-fit metrics
+MSE - Scale dependent.
+MAPE - Scale independent, makes sense if $y_t >> 0$ and y has a natural zero
+MASE - (proposed by Dr. Hyndman, read his paper [@Hyndman-06])
+
+# Dataset with Seasonality
+We analyze the disk usage of '/var/log' partition. We follow the analysis procedure described by [@Hyndman-13]. 
+
+Import the dataset
+```{r}
+import_df = read.csv('datasets/varlog.csv', header = TRUE)
+timestamp_raw = import_df$time
+usage_raw = import_df$usage
+if (length(unique(timestamp_raw)) != length(timestamp_raw)) {
+  print("WARNING: Dataset has repeated datapoints in timestamp_raw");
+}
+```
+
+Plot the dataset
+```{r}
+timestamp_posix <- as.POSIXct(timestamp_raw, origin='1970-01-01', tz='EST')
+analyze_df <- data.frame(time=timestamp_posix, Empirical=usage_raw)
+ggplot(melt(analyze_df, id = "time"), aes(time, value, color=variable)) + geom_line(size=0.5) + scale_fill_grey() + theme(panel.grid.major = element_line(colour = 'grey'), panel.grid.minor = element_line(colour = 'light grey'), panel.background = element_rect(fill = 'white')) + ggtitle("Analysis for disk usage (/var/log)") + xlab("Date/Time") + ylab('Usage (%)') + scale_colour_manual(values=palet) + labs(colour = "") 
+```
+
+From the plots, we observe two seasonal patterns, one daily and one hourly. This partition's disk uage increases during the day as log files are appended. At the end of the day, a certain portion of the disk partition is backed up, thus reducing the disk usage by a few percentage. However the disk usage is not back to the original value as the previous day, and hence the aging. We are not sure what causes the hourly seasonal pattern in the data.
+
+Let us consider two kind of datasets for our analysis. The first one is the above raw dataset that shows both hourly and daily seasonal pattern. The second one is the dataset with data averaged every hour, thus smoothening the hourly seasonal pattern. For each analytical technique, we use both the datasets and place the results for comparison sake. We skip certain analysis for certain datasets.
+
+Import the hourly averaged dataset
+```{r}
+import_df = read.csv('datasets/varlog_hr.csv', header = TRUE)
+timestamp_hr = import_df$time
+usage_hr = import_df$usage
+if (length(unique(timestamp_hr)) != length(timestamp_hr)) {
+  print("WARNING: Dataset has repeated datapoints in timestamp");
+}
+```
+
+Step 1: Prepare the Time-series (TS) datasets
+```{r}
+training_set_index <- round(length(timestamp_raw)*training_Set_size)
+timestamp_raw_train <- timestamp_raw[1:training_set_index]
+usage_raw_train <- usage_raw[1:training_set_index]
+timestamp_raw_test <- timestamp_raw[-(1:training_set_index)]
+usage_raw_test <- usage_raw[-(1:training_set_index)]
+
+timestamp_raw_posix <-  as.POSIXct(timestamp_raw, origin='1970-01-01', tz='EST')
+timestamp_raw_train_posix <- as.POSIXct(timestamp_raw_train, origin='1970-01-01', tz='EST')
+timestamp_raw_test_posix <- as.POSIXct(timestamp_raw_test, origin='1970-01-01', tz='EST')
+
+usage_train_ts <- ts(usage_raw_train, frequency = 12)
+usage_train_xts <- xts(usage_raw_train, order.by = timestamp_raw_train_posix)
+
+usage_test_ts <- ts(usage_raw_test, frequency = 12)
+usage_test_xts <- xts(usage_raw_test, order.by = timestamp_raw_test_posix)
+test_length <- length(usage_raw_test)
+```
+
+```{r}
+training_hr_set_index <- round(length(timestamp_hr) * training_Set_size)
+timestamp_hr_posix = as.POSIXct(timestamp_hr, origin="1970-01-01", tz="EST")
+timestamp_hr_train_posix <- timestamp_hr_posix[1:training_hr_set_index]
+timestamp_hr_test_posix <- timestamp_hr_posix[-c(1:training_hr_set_index)]
+
+usage_hr_train <- usage_hr[1:training_hr_set_index]
+usage_hr_test <- usage_hr[-c(1:training_hr_set_index)]
+
+usage_hr_train_ts <- ts(usage_hr_train, frequency = 24)
+usage_hr_train_xts <- xts(usage_hr_train, order.by = timestamp_hr_train_posix)
+usage_hr_test_ts <- ts(usage_hr_test, frequency = 24)
+usage_hr_test_xts <- xts(usage_hr_test, order.by = timestamp_hr_test_posix)
+test_hr_length <- length(usage_hr_test)
+```
+
+Step 2: Check the Autocorrelation (ACF) plot
+```{r acf-train}
+acf(usage_train_xts, main="")
+```
+
+```{r acf-hr-train}
+tsdisplay(usage_hr_train_xts)
+```
+
+From the ACF plot, we observe an hourly seasonal pattern (at lag 12, 24 and so on), but we cannot explain it. We remove the hourly seasonal pattern by using hourly approximated data; thus our dataset has a period of 24 (corresponding to 24 samples per day).
+
+For the raw dataset, we decompose and remove the seasonal pattern
+```{r}
+usage_train_ts_decomposed <- decompose(usage_train_ts)
+usage_train_decom_ts <- usage_train_ts - usage_train_ts_decomposed$seasonal
+usage_train_ts <- usage_train_decom_ts
+```
+
+We applied the following models to our datasets (in a similar sequence as that in [@Hyndman-13]). Please ignore any warnings in the plots below. Apologies for the same, can't figure out the packages in Rmd. 
+
+## Random walk forecasting 
+```{r}
+fc <- rwf(usage_train_ts)
+```
+
+For this model, we also demonstrate the procedure of evaluating a good model. This procedure can be applied to the following models as well, but skipped for brevity. 
+
+```{r}
+res <- residuals(fc)
+res <- res[2:length(res)] #first value is usually NA
+plot(density(res)) #Should be whitenoise => should have mean zero, constant variance, normally distributed. Should be uncorrelated as well
+acf(res) #95% values should be within the +-1.96/\sqrt{T}, then it is whitenoise. 
+#Statistical test to check if the residuals are white-noise. 
+Box.test(res, lag=12, fitdf=0) #change fitdf to no. of params (k), lag = h. Q* has a chi-2 distn with h-k degrees of f. 
+#when applied to raw data, k = 0. If p-value > 0.05, then it ''could'' be white-noise, else it is not. 
+Box.test(res, lag=12, fitdf=0, type = "Ljung")
+```
+
+```{r}
+fc <- rwf(usage_hr_train_ts) # or any such model
+res <- residuals(fc)
+res <- res[2:length(res)] #first value is usually NA
+plot(density(res)) #Should be whitenoise => should have mean zero, constant variance, normally distributed. Should be uncorrelated as well
+acf(res) #95% values should be within the +-1.96/\sqrt{T}, then it is whitenoise. 
+#Statistical test to check if the residuals are white-noise. 
+Box.test(res, lag=12, fitdf=0) #change fitdf to no. of params (k), lag = h. Q* has a chi-2 distn with h-k degrees of f. 
+#when applied to raw data, k = 0. If p-value > 0.05, then it ''could'' be white-noise, else it is not. 
+Box.test(res, lag=12, fitdf=0, type = "Ljung")
+```
+
+## Simple exp. smoothing (level only)
+```{r}
+ses_fit <- ses(usage_train_ts, h = test_length) #12 hours
+accuracy_SES_raw <- accuracy(ses_fit$mean, usage_raw_test)
+plot(ses_fit, plot.conf=TRUE)
+lines(fitted(ses_fit), col="red")
+```
+
+```{r}
+ses_fit <- ses(usage_hr_train_ts, h = test_hr_length)
+accuracy_SES_hr <- accuracy(ses_fit$mean, usage_hr_test)
+plot(ses_fit, plot.conf=TRUE)
+lines(fitted(ses_fit), col="red")
+```
+
+## Holt (SES + linear trend)
+```{r}
+holt_fit <- holt(usage_train_ts, h = test_length)
+accuracy_Holt_raw <- accuracy(holt_fit$mean, usage_raw_test)
+plot(holt_fit, plot.conf=TRUE)
+lines(fitted(holt_fit), col="red")
+```
 
 
+```{r}
+holt_fit <- holt(usage_hr_train_ts, h = test_hr_length)
+accuracy_Holt_hr <- accuracy(holt_fit$mean, usage_hr_test)
+plot(holt_fit, plot.conf=TRUE)
+lines(fitted(holt_fit), col="red")
+```
 
-### Cross-validation
+## Holt (SES + exponential trend)
+```{r}
+#holt_exp_fit <- holt(usage_train_ts, h = test_length, exponential = TRUE)
+#plot(holt_exp_fit, plot.conf=TRUE)
+#lines(fitted(holt_exp_fit), col="red")
+#accuracy_Holt_Exp_raw <- accuracy(holt_exp_fit$mean, usage_raw_test)
+```
 
+```{r}
+#holt_exp_fit <- holt(usage_hr_train_ts, h = test_hr_length, exponential = TRUE)
+#plot(holt_exp_fit, plot.conf=TRUE)
+#lines(fitted(holt_exp_fit), col="red")
+#accuracy_Holt_Exp_hr <- accuracy(holt_exp_fit$mean, usage_hr_test)
+```
+
+## Holt (SES + linear + damped trend)
+Damped is useful for long horizon forecast
+```{r}
+holt_damp_fit <- holt(usage_train_ts, h = test_length, damped = TRUE)
+accuracy_Holt_damp_raw <- accuracy(holt_damp_fit$mean, usage_raw_test)
+plot(holt_damp_fit, plot.conf=TRUE)
+lines(fitted(holt_damp_fit), col="red")
+```
+
+```{r}
+holt_damp_fit <- holt(usage_hr_train_ts, h = test_hr_length, damped = TRUE)
+accuracy_Holt_damp_hr <- accuracy(holt_damp_fit$mean, usage_hr_test)
+plot(holt_damp_fit, plot.conf=TRUE)
+lines(fitted(holt_damp_fit), col="red")
+```
+
+## Holt-Winters (Holt + seasonality)
+```{r}
+hw_fit <- hw(usage_train_ts, h = test_length) #Predict for 12hrs
+accuracy_HW_raw <- accuracy(hw_fit$mean, usage_raw_test)
+plot(hw_fit, plot.conf=TRUE, xlab="Date / Time", ylab="/var/log (%)", main="")
+lines(fitted(hw_fit), col="red")
+#title(main="Forecasts from Holt-Winters' additive method",  cex.main=1)
+```
+
+```{r,results='hide',fig.keep='all'}
+hw_fit <- hw(usage_hr_train_ts, h = test_hr_length, level=c(50,95)) #Predict for 12hrs
+accuracy_HW_hr <- accuracy(hw_fit$mean, usage_hr_test)
+plot(hw_fit, plot.conf=TRUE, xlab="Date / Time", ylab="/var/log (%)", main="")
+lines(fitted(hw_fit), col="red")
+```
+
+The above plot appears as Fig.5 in [@WOSAR17]. 
+
+## Holt-Winters (Holt + multiplicative seasonality)
+```{r}
+hw_mult_fit <- hw(usage_train_ts, seasonal="mult", h = test_length) #Predict for 12hrs
+accuracy_HW_mult_raw <- accuracy(hw_mult_fit$mean, usage_raw_test)
+plot(hw_mult_fit, plot.conf=TRUE)
+lines(fitted(hw_mult_fit), col="red")
+```
+
+```{r}
+hw_mult_fit <- hw(usage_hr_train_ts, seasonal="mult", h = test_hr_length) #Predict for 12hrs
+accuracy_HW_mult_hr <- accuracy(hw_mult_fit$mean, usage_hr_test)
+plot(hw_mult_fit, plot.conf=TRUE)
+lines(fitted(hw_mult_fit), col="red")
+```
+
+## Holt-Winters (Holt + multiplicative seasonality + damped)
+```{r}
+hw_mult_damped_fit <- hw(usage_train_ts, seasonal="mult", damped=TRUE, h = test_length) #Predict for 12hrs
+accuracy_Holt_mult_damp_raw <- accuracy(hw_mult_damped_fit$mean, usage_raw_test)
+plot(hw_mult_damped_fit, plot.conf=TRUE)
+lines(fitted(hw_mult_damped_fit), col="red")
+```
+
+```{r}
+hw_mult_damped_fit <- hw(usage_hr_train_ts, seasonal="mult", damped=TRUE, h = test_hr_length) #Predict for 12hrs
+accuracy_Holt_mult_damp_hr <- accuracy(hw_mult_damped_fit$mean, usage_hr_test)
+plot(hw_mult_damped_fit, plot.conf=TRUE)
+lines(fitted(hw_mult_damped_fit), col="red")
+```
+
+## ARIMA 
+```{r}
+fit_arima <- auto.arima(usage_hr_train_ts, max.P = 0, max.Q = 0, D = 0)
+fit_arima_forecast <- forecast(fit_arima, h =test_hr_length)
+accuracy_ARIMA_hr <- accuracy(fit_arima_forecast$mean, usage_hr_test)
+plot(fit_arima_forecast)
+```
+
+## ARIMA (by hand)
+```{r}
+fit_arima_hand <- arima(x = usage_hr_train_ts, order = c(4,1,0))
+fit_arima_forecast_hand <- forecast(fit_arima_hand, h =test_hr_length)
+accuracy_ARIMA_hr_hand <- accuracy(fit_arima_forecast_hand$mean, usage_hr_test)
+plot(fit_arima_forecast_hand)
+```
+
+## Goodness-of-fit
+### Raw dataset
+```{r}
+gof_raw_df = rbind(accuracy_SES_raw, accuracy_Holt_raw, accuracy_Holt_damp_raw, accuracy_HW_raw, accuracy_HW_mult_raw, accuracy_Holt_mult_damp_raw)
+rownames(gof_raw_df) = c("SES", "Holt", "Holt + damped", "Holt-Winters", "Holt-Winters + mult. seasonal", "Holt-Winters + mult. seasonal + damped")
+kable(gof_raw_df)
+```
+
+### Hourly-averaged dataset
+```{r}
+gof_hr_df = rbind(accuracy_SES_hr, accuracy_Holt_hr, accuracy_Holt_damp_hr, accuracy_HW_hr, accuracy_HW_mult_hr, accuracy_Holt_mult_damp_hr, accuracy_ARIMA_hr, accuracy_ARIMA_hr_hand)
+rownames(gof_hr_df) = c("SES", "Holt", "Holt + damped", "Holt-Winters", "Holt-Winters + mult. seasonal", "Holt-Winters + mult. seasonal + damped", "ARIMA", "ARIMA (by hand)")
+kable(gof_hr_df)
+```
+
+In both the datasets, we see Holt-Winters is the best-fit model. 
+
+## Cross-validation
+For modeling techniques producing reasonably good results, let us perform one-step cross validation. We consider the first 3 days of data as training, and predict the next 12 hrs. of data by cross-validating over incremental time-series in multiple iterations. 
+
+```{r}
+n = length(timestamp_hr)
+k = round(n*training_Set_size)
+cross_len = 12
+mae1 <- mae2 <- mae3 <- mae4 <- mae5 <- matrix(NA, n-k-cross_len, cross_len)
+for (i in 0:(n-k-cross_len-1)) {
+  #cat(sprintf("i=%d\n", i));
+  usage_hr_crosstrain <- usage_hr[1:(k+i)]
+  usage_hr_crosstest <- usage_hr[(k+i+1):(k+i+cross_len)]
+  usage_hr_crosstrain_ts <- ts(usage_hr_crosstrain, frequency = 24)
+  
+  hw_fit <- hw(usage_hr_crosstrain_ts, h = cross_len)
+  hw_mult_fit <- hw(usage_hr_crosstrain_ts, seasonal = "mult", h = cross_len)
+  fit_arima <- auto.arima(usage_hr_crosstrain_ts, max.P = 0, max.Q = 0, D = 0)
+  fit_arima_forecast <- forecast(fit_arima, h =cross_len)
+  holt_fit <- holt(usage_hr_crosstrain_ts, h = cross_len)
+  
+  mae1[i+1,] <- abs(hw_fit$mean - usage_hr_crosstest)
+  mae2[i+1,] <- abs(hw_mult_fit$mean - usage_hr_crosstest)
+  mae3[i+1,] <- abs(fit_arima_forecast$mean - usage_hr_crosstest)
+  mae4[i+1,] <- abs(holt_fit$mean - usage_hr_crosstest)
+}
+
+plot(1:cross_len,colMeans(mae1),ylim=c(0.15,0.75), type="o",col=1,xlab="Lag (hour)",ylab="MAE", main="", pch=0)
+lines(1:cross_len,colMeans(mae2),type="o",col=1, pch=1)
+lines(1:cross_len,colMeans(mae3),type="o",col=1, pch=2)
+lines(1:cross_len,colMeans(mae4),type="o",col=1, pch=4)
+legend("topleft",legend=c("Holt-Winters", "Holt-Winters (Mult.)", "ARIMA (auto)", "Holt"),pch=c(0,1,2,4),lty=1)
+title(main="One-step forecasts using Cross Validation",  cex.main=1)
+```
 
 # References
